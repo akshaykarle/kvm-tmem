@@ -5267,6 +5267,10 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 	case KVM_HC_MMU_OP:
 		r = kvm_pv_mmu_op(vcpu, a0, hc_gpa(vcpu, a1, a2), &ret);
 		break;
+	case KVM_HC_TMEM:
+		r = kvm_pv_tmem_op(vcpu, a0, &ret);
+		ret = ret - 1000;
+		break;
 	default:
 		ret = -KVM_ENOSYS;
 		break;

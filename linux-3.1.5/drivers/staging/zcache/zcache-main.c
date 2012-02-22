@@ -30,6 +30,7 @@
 #include <linux/atomic.h>
 #include <linux/math64.h>
 #include "tmem.h"
+#include "kvm-tmem.h"
 
 #include "../zram/xvmalloc.h" /* if built in drivers/staging */
 
@@ -669,7 +670,7 @@ static struct zv_hdr *zv_create(struct xv_pool *xvpool, uint32_t pool_id,
 	int chunks = (alloc_size + (CHUNK_SIZE - 1)) >> CHUNK_SHIFT;
 	int ret;
 
-	BUG_ON(!irqs_disabled());
+	//BUG_ON(!irqs_disabled());
 	BUG_ON(chunks >= NCHUNKS);
 	ret = xv_malloc(xvpool, alloc_size,
 			&page, &offset, ZCACHE_GFP_MASK);
@@ -1313,7 +1314,7 @@ static int zcache_compress(struct page *from, void **out_va, size_t *out_len)
 	unsigned char *wmem = __get_cpu_var(zcache_workmem);
 	char *from_va;
 
-	BUG_ON(!irqs_disabled());
+	//BUG_ON(!irqs_disabled());
 	if (unlikely(dmem == NULL || wmem == NULL))
 		goto out;  /* no buffer, so can't compress */
 	from_va = kmap_atomic(from, KM_USER0);
@@ -1533,7 +1534,7 @@ static int zcache_put_page(int cli_id, int pool_id, struct tmem_oid *oidp,
 	struct tmem_pool *pool;
 	int ret = -1;
 
-	BUG_ON(!irqs_disabled());
+	//BUG_ON(!irqs_disabled());
 	pool = zcache_get_pool_by_id(cli_id, pool_id);
 	if (unlikely(pool == NULL))
 		goto out;
@@ -1898,6 +1899,67 @@ struct frontswap_ops zcache_frontswap_register_ops(void)
 #endif
 
 /*
+ * tmem op to support tmem in kvm guests
+ */
+
+int kvm_pv_tmem_op(struct kvm_vcpu *vcpu, gpa_t addr, unsigned long *ret)
+{
+	struct tmem_op op;
+	struct tmem_oid oid;
+	uint64_t pfn;
+	struct page *page;
+	int r;
+
+	r = kvm_read_guest(vcpu->kvm, addr, &op, sizeof(op));
+	if (r < 0)
+		return r;
+
+	switch (op.cmd) {
+	case TMEM_NEW_POOL:
+		*ret = zcache_new_pool(op.u.new.cli_id, op.u.new.flags);
+		break;
+	case TMEM_DESTROY_POOL:
+		*ret = zcache_destroy_pool(op.u.gen.cli_id, op.pool_id);
+		break;
+	case TMEM_NEW_PAGE:
+		break;
+	case TMEM_PUT_PAGE:
+		pfn = gfn_to_pfn(vcpu->kvm, op.u.gen.pfn);
+		page = pfn_to_page(pfn);
+		oid.oid[0] = op.u.gen.oid[0];
+		oid.oid[1] = op.u.gen.oid[1];
+		oid.oid[2] = op.u.gen.oid[2];
+		VM_BUG_ON(!PageLocked(page));
+		*ret = zcache_put_page(op.u.gen.cli_id, op.pool_id,
+				&oid, op.u.gen.index, page);
+		break;
+	case TMEM_GET_PAGE:
+		pfn = gfn_to_pfn(vcpu->kvm, op.u.gen.pfn);
+		page = pfn_to_page(pfn);
+		oid.oid[0] = op.u.gen.oid[0];
+		oid.oid[1] = op.u.gen.oid[1];
+		oid.oid[2] = op.u.gen.oid[2];
+		*ret = zcache_get_page(TMEM_CLI, op.pool_id,
+				&oid, op.u.gen.index, page);
+		break;
+	case TMEM_FLUSH_PAGE:
+		oid.oid[0] = op.u.gen.oid[0];
+		oid.oid[1] = op.u.gen.oid[1];
+		oid.oid[2] = op.u.gen.oid[2];
+		*ret = zcache_flush_page(op.u.gen.cli_id, op.pool_id,
+				&oid, op.u.gen.index);
+		break;
+	case TMEM_FLUSH_OBJECT:
+		oid.oid[0] = op.u.gen.oid[0];
+		oid.oid[1] = op.u.gen.oid[1];
+		oid.oid[2] = op.u.gen.oid[2];
+		*ret = zcache_flush_object(op.u.gen.cli_id, op.pool_id, &oid);
+		break;
+	}
+	return 0;
+}
+
+/*
  * zcache initialization
  * NOTE FOR NOW zcache MUST BE PROVIDED AS A KERNEL BOOT PARAMETER OR
  * NOTHING HAPPENS!
@@ -1934,10 +1996,19 @@ static int __init no_frontswap(char *s)
 
 __setup("nofrontswap", no_frontswap);
 
+static int kvm_tmem_enabled = 0;
+
+static int __init enable_kvm_tmem(char *s)
+{
+	kvm_tmem_enabled = 1;
+	return 1;
+}
+
+__setup("kvmtmem", enable_kvm_tmem);
+
 static int __init zcache_init(void)
 {
 	int ret = 0;
-
 #ifdef CONFIG_SYSFS
 	ret = sysfs_create_group(mm_kobj, &zcache_attr_group);
 	if (ret) {
@@ -1946,7 +2017,7 @@ static int __init zcache_init(void)
 	}
 #endif /* CONFIG_SYSFS */
 #if defined(CONFIG_CLEANCACHE) || defined(CONFIG_FRONTSWAP)
-	if (zcache_enabled) {
+	if (zcache_enabled || kvm_tmem_enabled) {
 		unsigned int cpu;
 
 		tmem_register_hostops(&zcache_hostops);
@@ -1966,10 +2037,24 @@ static int __init zcache_init(void)
 				sizeof(struct tmem_objnode), 0, 0, NULL);
 	zcache_obj_cache = kmem_cache_create("zcache_obj",
 				sizeof(struct tmem_obj), 0, 0, NULL);
-	ret = zcache_new_client(LOCAL_CLIENT);
-	if (ret) {
-		pr_err("zcache: can't create client\n");
+	if(kvm_tmem_enabled) {
+		ret = zcache_new_client(TMEM_CLI);
+		if(ret) {
+			pr_err("zcache: can't create client\n");
+			goto out;
+		}
+		zbud_init();
+		register_shrinker(&zcache_shrinker);
+		pr_info("zcache: transcendent memory enabled using kernel "
+			"for kvm guests\n");
 		goto out;
+	}
+	else {
+		ret = zcache_new_client(LOCAL_CLIENT);
+		if (ret) {
+			pr_err("zcache: can't create client\n");
+			goto out;
+		}
 	}
 #endif
 #ifdef CONFIG_CLEANCACHE
