@@ -1,0 +1,42 @@
+Project Title: Transcendent Memory on KVM
+
+College: Maharashtra Academy of Engineering, Pune, India.
+
+Project Members:
+1. Akshay Karle <akshy.a.karle@gmail.com>
+2. Ashutosh Tripathi <er.ashutripathi@gmail.com>
+3. Shreyas Mahure <shreyas.mahure@gmail.com>
+4. Nishant Gulhane <nishant.s.gulhane@gmail.com>
+
+Project Guide: Amar More <amarmore2006@gmail.com>
+
+Project Description:
+	Transcendent Memory (or tmem in short) is memory optimization technique
+for the virtualized environment. The idea is to collect the underutilized memory
+of the guests and the unassigned memory of the host and places it into a a
+central pool. Indirect access to the pool is then provided to the guests to
+relieve their memory pressures. This technique also aims to reduce the number of
+disk accesses by storing the page cache pages into a special tmem pool called as
+'Cleancache' and similarly the swap pages can be stored in a tmem pool called as
+'Frontswap'.
+	We implement this technique in the KVM Hypervisor.
+
+Information about KVM can be found at:
+www.kvm.org
+
+Information about Transcendent Memory can be found at:
+http://lwn.net/Articles/454795/
+
+To enable Transcendent memory support on the kvm host add the boot parameter:
+"kvmtmem"
+
+And to enable Transcendent memory in the kvm guests add the boot parameter:
+"tmem"
+
+To disable selfballooning add the boot parameter:
+"noselfballooning"
+
+Run update-grub and reboot.
+
+
+Note: If you want to use zcache and kvm-tmem both at the host, add the both the parameters("zcache kvmtmem"). 
