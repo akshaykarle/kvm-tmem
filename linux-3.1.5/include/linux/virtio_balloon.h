@@ -56,4 +56,34 @@ struct virtio_balloon_stat {
 	u64 val;
 } __attribute__((packed));
 
+struct virtio_balloon
+{
+	struct virtio_device *vdev;
+	struct virtqueue *inflate_vq, *deflate_vq, *stats_vq;
+
+	/* Where the ballooning thread waits for config to change. */
+	wait_queue_head_t config_change;
+
+	/* The thread servicing the balloon. */
+	struct task_struct *thread;
+
+	/* Waiting for host to ack the pages we released. */
+	struct completion acked;
+
+	/* The pages we've told the Host we're not using. */
+	unsigned int num_pages;
+	struct list_head pages;
+
+	/* The array of pfns we tell the Host about. */
+	unsigned int num_pfns;
+	u32 pfns[256];
+
+	/* Memory statistics */
+	int need_stats_update;
+	struct virtio_balloon_stat stats[VIRTIO_BALLOON_S_NR];
+};
+
+extern struct virtio_balloon *vbal;
+
+extern void selfballoon_target(struct virtio_balloon *vb, unsigned int tgt_pages);
 #endif /* _LINUX_VIRTIO_BALLOON_H */
