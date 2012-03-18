@@ -26,32 +26,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 
-struct virtio_balloon
-{
-	struct virtio_device *vdev;
-	struct virtqueue *inflate_vq, *deflate_vq, *stats_vq;
-
-	/* Where the ballooning thread waits for config to change. */
-	wait_queue_head_t config_change;
-
-	/* The thread servicing the balloon. */
-	struct task_struct *thread;
-
-	/* Waiting for host to ack the pages we released. */
-	struct completion acked;
-
-	/* The pages we've told the Host we're not using. */
-	unsigned int num_pages;
-	struct list_head pages;
-
-	/* The array of pfns we tell the Host about. */
-	unsigned int num_pfns;
-	u32 pfns[256];
-
-	/* Memory statistics */
-	int need_stats_update;
-	struct virtio_balloon_stat stats[VIRTIO_BALLOON_S_NR];
-};
+struct virtio_balloon *vbal;
 
 static struct virtio_device_id id_table[] = {
 	{ VIRTIO_ID_BALLOON, VIRTIO_DEV_ANY_ID },
@@ -227,7 +202,6 @@ static void stats_handle_request(struct virtio_balloon *vb)
 static void virtballoon_changed(struct virtio_device *vdev)
 {
 	struct virtio_balloon *vb = vdev->priv;
-
 	wake_up(&vb->config_change);
 }
 
@@ -243,10 +217,37 @@ static inline s64 towards_target(struct virtio_balloon *vb)
 static void update_balloon_size(struct virtio_balloon *vb)
 {
 	__le32 actual = cpu_to_le32(vb->num_pages);
-
+	u32 temp;
 	vb->vdev->config->set(vb->vdev,
 			      offsetof(struct virtio_balloon_config, actual),
 			      &actual, sizeof(actual));
+}
+
+/* If selfballooning is enabled for the guest, save the new balloon target and
+ * wake-up the balloon thread to perform the inflation/deflation operation.
+ */
+static unsigned int selfballoon_tgt;
+
+void selfballoon_target(struct virtio_balloon *vb, unsigned int tgt_pages)
+{
+	virtballoon_changed(vb->vdev);
+	selfballoon_tgt  = tgt_pages;
+}
+
+long int selfballoon_get_target(struct virtio_balloon *vb)
+{
+	long int diff;
+	diff = (long int)(selfballoon_tgt - vb->num_pages);
+	// We don't want the guest to give away too much
+	if((totalram_pages - diff) > 40000)
+		return diff;
+	else
+		return 0;
+}
+
+void set_virtio_balloon(struct virtio_balloon *vb)
+{
+	vbal = vb;
 }
 
 static int balloon(void *_vballoon)
@@ -255,11 +256,11 @@ static int balloon(void *_vballoon)
 
 	set_freezable();
 	while (!kthread_should_stop()) {
-		s64 diff;
+		long int diff;
 
 		try_to_freeze();
 		wait_event_interruptible(vb->config_change,
-					 (diff = towards_target(vb)) != 0
+					(diff = selfballoon_get_target(vb)) != 0
 					 || vb->need_stats_update
 					 || kthread_should_stop()
 					 || freezing(current));
@@ -322,7 +323,7 @@ static int virtballoon_probe(struct virtio_device *vdev)
 		err = PTR_ERR(vb->thread);
 		goto out_del_vqs;
 	}
-
+	set_virtio_balloon(vb);
 	return 0;
 
 out_del_vqs:
